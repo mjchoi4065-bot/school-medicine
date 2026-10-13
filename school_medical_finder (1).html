@@ -1,0 +1,451 @@
+<!DOCTYPE html>
+<html lang="ko">
+<head>
+    <meta charset="UTF-8">
+    <meta name="viewport" content="width=device-width, initial-scale=1.0">
+    <title>학교 주변 병원·약국 찾기</title>
+    <style>
+        /* 화면 전체의 기본 설정 */
+        * { box-sizing: border-box; }
+        html, body { width: 100%; height: 100%; margin: 0; }
+        body { font-family: Arial, "Malgun Gothic", sans-serif; color: #222; }
+        .container { display: flex; width: 100%; height: 100vh; height: 100dvh; }
+
+        /* 왼쪽 검색 패널 */
+        .sidebar {
+            display: flex; flex-direction: column; flex: 0 0 370px;
+            min-width: 300px; padding: 22px; background: #fff;
+            border-right: 1px solid #ddd; z-index: 1; min-height: 0;
+        }
+        h1 { margin: 0 0 8px; font-size: 23px; }
+        .description { margin: 0 0 18px; color: #666; font-size: 13px; line-height: 1.6; }
+        .search-form { display: flex; gap: 8px; }
+        #searchInput {
+            flex: 1; min-width: 0; padding: 12px; border: 1px solid #ccc;
+            border-radius: 8px; font-size: 14px;
+        }
+        #searchButton {
+            padding: 0 16px; border: 0; border-radius: 8px;
+            background: #3478f6; color: #fff; font-size: 14px; cursor: pointer;
+        }
+        #searchButton:disabled { background: #aaa; cursor: wait; }
+        #statusMessage { margin: 13px 0; color: #555; font-size: 13px; line-height: 1.6; }
+        #schoolName { font-weight: bold; font-size: 15px; margin: 0 0 10px; }
+        .counts { display: flex; gap: 8px; margin-bottom: 12px; }
+        .count { flex: 1; padding: 10px; background: #f3f5f8; border-radius: 8px; text-align: center; font-size: 13px; }
+        .count strong { display: block; margin-top: 4px; font-size: 20px; }
+        #resultList { flex: 1; min-height: 0; overflow-y: auto; border-top: 1px solid #eee; }
+        .result-item { padding: 13px 5px; border-bottom: 1px solid #eee; cursor: pointer; }
+        .result-item:hover, .result-item:focus { background: #f4f8ff; outline: none; }
+        .place-heading { display: flex; gap: 7px; align-items: center; margin-bottom: 7px; }
+        .place-type { flex-shrink: 0; padding: 4px 6px; border-radius: 5px; font-size: 11px; font-weight: bold; }
+        .hospital { background: #ffe8e8; color: #b82e2e; }
+        .pharmacy { background: #e4f5e9; color: #207743; }
+        .place-name { font-size: 14px; font-weight: bold; }
+        .place-address, .place-phone, .place-hours { margin-top: 5px; color: #666; font-size: 12px; line-height: 1.5; }
+        .place-link { display: inline-block; margin-top: 7px; color: #2469d8; font-size: 12px; text-decoration: none; }
+        .place-link:hover { text-decoration: underline; }
+
+        /* 오른쪽 지도: 높이가 0이 되지 않도록 명시적으로 지정 */
+        #map { flex: 1 1 auto; min-width: 0; height: 100%; background: #e9edf1; }
+
+        @media (max-width: 700px) {
+            .container { flex-direction: column; }
+            .sidebar { flex: 0 0 48%; width: 100%; min-width: 0; min-height: 250px; padding: 15px; }
+            #map { flex: 1 1 52%; width: 100%; min-height: 220px; }
+            h1 { font-size: 20px; }
+        }
+    </style>
+</head>
+<body>
+    <div class="container">
+        <!-- 왼쪽: 학교 검색과 주변 의료시설 목록 -->
+        <aside class="sidebar">
+            <h1>학교 주변 병원·약국</h1>
+            <p class="description">학교 이름을 검색하면 주변 5km 이내 병원과 약국을 표시합니다.</p>
+            <form id="searchForm" class="search-form">
+                <input id="searchInput" type="text" placeholder="예: 고양국제고등학교" aria-label="학교 이름" autocomplete="off" required>
+                <button id="searchButton" type="submit" disabled>검색</button>
+            </form>
+            <p id="statusMessage" role="status" aria-live="polite">카카오 지도를 불러오는 중입니다.</p>
+            <div id="schoolName"></div>
+            <div class="counts">
+                <div class="count">병원<strong id="hospitalCount">0</strong></div>
+                <div class="count">약국<strong id="pharmacyCount">0</strong></div>
+            </div>
+            <div id="resultList"></div>
+        </aside>
+
+        <!-- 오른쪽: 카카오 지도 -->
+        <main id="map" aria-label="학교 주변 병원과 약국 지도"></main>
+    </div>
+
+    <!-- SDK를 정적으로 불러와 로드 순서 문제를 줄입니다. JavaScript 키를 사용해야 합니다. -->
+    <script
+        src="https://dapi.kakao.com/v2/maps/sdk.js?appkey=5411a501c2e1f61e92cfa9800f5faead&libraries=services"
+        onerror="showSdkError()">
+    </script>
+    <script>
+        // HTML 요소를 가져옵니다.
+        const searchForm = document.getElementById("searchForm");
+        const searchInput = document.getElementById("searchInput");
+        const searchButton = document.getElementById("searchButton");
+        const statusMessage = document.getElementById("statusMessage");
+        const schoolNameElement = document.getElementById("schoolName");
+        const resultList = document.getElementById("resultList");
+        const hospitalCount = document.getElementById("hospitalCount");
+        const pharmacyCount = document.getElementById("pharmacyCount");
+
+        // 지도 및 검색 기능에 사용할 변수를 준비합니다.
+        let map = null;
+        let places = null;
+        let infoWindow = null;
+        let schoolMarker = null;
+        let schoolPosition = null;
+        let medicalMarkers = [];
+        let latestSearchId = 0;
+
+        // 주변 검색 반경(미터)과 지도 기본 위치를 설정합니다.
+        const searchRadius = 5000;
+        const defaultPosition = { lat: 37.5665, lng: 126.9780 };
+
+        // SDK 로드 오류가 발생하면 화면에 안내합니다.
+        function showSdkError() {
+            statusMessage.textContent =
+                "카카오 지도 SDK를 불러오지 못했습니다. JavaScript 키, 웹 도메인 등록, 인터넷 연결을 확인하세요.";
+        }
+
+        // SDK가 정상적으로 준비된 뒤 지도를 생성합니다.
+        function initializeMap() {
+            if (!window.kakao || !kakao.maps) {
+                showSdkError();
+                return;
+            }
+
+            try {
+                const mapContainer = document.getElementById("map");
+                map = new kakao.maps.Map(mapContainer, {
+                    center: new kakao.maps.LatLng(defaultPosition.lat, defaultPosition.lng),
+                    level: 5
+                });
+
+                // 지도와 장소 검색 서비스가 준비되면 검색을 활성화합니다.
+                places = new kakao.maps.services.Places();
+                infoWindow = new kakao.maps.InfoWindow({ zIndex: 10 });
+                searchButton.disabled = false;
+                statusMessage.textContent = "학교 이름을 입력한 뒤 검색하세요.";
+            } catch (error) {
+                console.error("지도 초기화 오류:", error);
+                statusMessage.textContent =
+                    "지도를 초기화하지 못했습니다. 브라우저 개발자 도구의 Console 오류를 확인하세요.";
+            }
+        }
+
+        // 학교 검색 전에 이전 마커와 목록을 지웁니다.
+        function clearPreviousResults() {
+            medicalMarkers.forEach(function (marker) {
+                marker.setMap(null);
+            });
+            medicalMarkers = [];
+
+            if (schoolMarker) {
+                schoolMarker.setMap(null);
+                schoolMarker = null;
+            }
+
+            if (infoWindow) infoWindow.close();
+
+            resultList.replaceChildren();
+            schoolNameElement.textContent = "";
+            hospitalCount.textContent = "0";
+            pharmacyCount.textContent = "0";
+            schoolPosition = null;
+        }
+
+        // 검색 요청을 시작합니다.
+        searchForm.addEventListener("submit", function (event) {
+            event.preventDefault();
+
+            if (!map || !places) {
+                statusMessage.textContent = "지도가 아직 준비되지 않았습니다. 잠시 후 다시 시도하세요.";
+                return;
+            }
+
+            const keyword = searchInput.value.trim();
+            if (!keyword) {
+                statusMessage.textContent = "학교 이름을 입력해주세요.";
+                return;
+            }
+
+            const searchId = ++latestSearchId;
+            clearPreviousResults();
+            searchButton.disabled = true;
+            statusMessage.textContent = "학교 위치를 찾는 중입니다...";
+
+            searchSchool(keyword, searchId);
+        });
+
+        // 입력한 이름으로 학교 장소를 찾습니다.
+        function searchSchool(keyword, searchId) {
+            places.keywordSearch(keyword, function (data, status) {
+                if (searchId !== latestSearchId) return;
+
+                if (status !== kakao.maps.services.Status.OK) {
+                    statusMessage.textContent =
+                        "학교를 찾지 못했습니다. 학교의 정식 명칭이나 지역명을 함께 입력해보세요.";
+                    searchButton.disabled = false;
+                    return;
+                }
+
+                // 학교 카테고리(SC4) 결과를 우선 사용합니다.
+                const schoolResults = data.filter(function (place) {
+                    return place.category_group_code === "SC4" ||
+                        (place.category_name || "").includes("학교");
+                });
+
+                if (schoolResults.length === 0) {
+                    statusMessage.textContent =
+                        "검색 결과에서 학교를 확인하지 못했습니다. 예: '고양국제고등학교 고양시'처럼 입력해보세요.";
+                    searchButton.disabled = false;
+                    return;
+                }
+
+                const school = schoolResults[0];
+                schoolPosition = new kakao.maps.LatLng(Number(school.y), Number(school.x));
+
+                schoolMarker = new kakao.maps.Marker({
+                    map: map,
+                    position: schoolPosition,
+                    title: school.place_name
+                });
+
+                schoolNameElement.textContent = "기준 학교: " + school.place_name;
+                map.setCenter(schoolPosition);
+                map.setLevel(5);
+
+                kakao.maps.event.addListener(schoolMarker, "click", function () {
+                    showInfo(school.place_name, "검색 기준 학교", schoolMarker);
+                });
+
+                searchNearbyPlaces(searchId);
+            }, { size: 15 });
+        }
+
+        // 병원(HP8)과 약국(PM9)을 학교 위치 기준으로 검색합니다.
+        function searchCategory(categoryCode) {
+            return new Promise(function (resolve, reject) {
+                places.categorySearch(categoryCode, function (data, status) {
+                    if (status === kakao.maps.services.Status.OK) {
+                        resolve(data);
+                    } else if (status === kakao.maps.services.Status.ZERO_RESULT) {
+                        resolve([]);
+                    } else {
+                        reject(new Error("카테고리 검색 실패: " + categoryCode + " (" + status + ")"));
+                    }
+                }, {
+                    location: schoolPosition,
+                    radius: searchRadius,
+                    sort: kakao.maps.services.SortBy.DISTANCE,
+                    size: 15
+                });
+            });
+        }
+
+        // 두 종류의 검색이 모두 끝나면 목록과 마커를 표시합니다.
+        function searchNearbyPlaces(searchId) {
+            statusMessage.textContent = "학교 주변 병원과 약국을 검색 중입니다...";
+
+            Promise.all([searchCategory("HP8"), searchCategory("PM9")])
+                .then(function (results) {
+                    if (searchId !== latestSearchId) return;
+
+                    const hospitals = results[0].map(function (place) {
+                        return { ...place, medicalType: "병원" };
+                    });
+                    const pharmacies = results[1].map(function (place) {
+                        return { ...place, medicalType: "약국" };
+                    });
+                    const allPlaces = hospitals.concat(pharmacies);
+
+                    // 거리 정보가 있으면 가까운 순서로 정렬합니다.
+                    allPlaces.sort(function (a, b) {
+                        return Number(a.distance || 0) - Number(b.distance || 0);
+                    });
+
+                    hospitalCount.textContent = String(hospitals.length);
+                    pharmacyCount.textContent = String(pharmacies.length);
+
+                    displayPlaces(allPlaces);
+
+                    if (allPlaces.length === 0) {
+                        statusMessage.textContent = "반경 5km 안에서 병원이나 약국을 찾지 못했습니다.";
+                        return;
+                    }
+
+                    // 학교와 검색 결과가 지도 안에 함께 보이도록 조정합니다.
+                    const bounds = new kakao.maps.LatLngBounds();
+                    bounds.extend(schoolPosition);
+                    allPlaces.forEach(function (place) {
+                        bounds.extend(new kakao.maps.LatLng(Number(place.y), Number(place.x)));
+                    });
+                    map.setBounds(bounds);
+
+                    statusMessage.textContent =
+                        "검색 완료: 병원 " + hospitals.length + "곳, 약국 " +
+                        pharmacies.length + "곳 (반경 5km, 종류별 최대 15곳)";
+                })
+                .catch(function (error) {
+                    if (searchId !== latestSearchId) return;
+                    console.error(error);
+                    statusMessage.textContent =
+                        "주변 장소 검색에 실패했습니다. 카카오맵 설정과 브라우저 Console을 확인하세요.";
+                })
+                .finally(function () {
+                    if (searchId === latestSearchId) searchButton.disabled = false;
+                });
+        }
+
+        // 검색 결과를 지도 마커와 왼쪽 목록에 추가합니다.
+        function displayPlaces(data) {
+            data.forEach(function (place) {
+                const position = new kakao.maps.LatLng(Number(place.y), Number(place.x));
+                const marker = new kakao.maps.Marker({
+                    map: map,
+                    position: position,
+                    title: place.place_name
+                });
+                medicalMarkers.push(marker);
+
+                kakao.maps.event.addListener(marker, "click", function () {
+                    showMedicalInfo(place, marker);
+                });
+
+                const item = document.createElement("div");
+                item.className = "result-item";
+                item.tabIndex = 0;
+                item.setAttribute("role", "button");
+
+                const heading = document.createElement("div");
+                heading.className = "place-heading";
+
+                const type = document.createElement("span");
+                type.className = "place-type " +
+                    (place.medicalType === "병원" ? "hospital" : "pharmacy");
+                type.textContent = place.medicalType;
+
+                const name = document.createElement("span");
+                name.className = "place-name";
+                name.textContent = place.place_name;
+
+                heading.append(type, name);
+                item.appendChild(heading);
+
+                const address = document.createElement("div");
+                address.className = "place-address";
+                address.textContent = place.road_address_name ||
+                    place.address_name || "주소 정보 없음";
+                item.appendChild(address);
+
+                if (place.phone) {
+                    const phone = document.createElement("div");
+                    phone.className = "place-phone";
+                    phone.textContent = "전화: " + place.phone;
+                    item.appendChild(phone);
+                }
+
+                // 장소 검색 응답에 영업시간이 없으므로 임의의 시간을 표시하지 않습니다.
+                const hours = document.createElement("div");
+                hours.className = "place-hours";
+                hours.textContent = "오픈·클로즈 시간: 카카오맵 상세 정보에서 확인";
+                item.appendChild(hours);
+
+                if (place.place_url) {
+                    const link = document.createElement("a");
+                    link.className = "place-link";
+                    link.href = place.place_url;
+                    link.target = "_blank";
+                    link.rel = "noopener noreferrer";
+                    link.textContent = "카카오맵 상세 정보 / 영업시간";
+                    link.addEventListener("click", function (event) {
+                        event.stopPropagation();
+                    });
+                    item.appendChild(link);
+                }
+
+                function selectPlace() {
+                    map.setCenter(position);
+                    map.setLevel(4);
+                    showMedicalInfo(place, marker);
+                }
+
+                item.addEventListener("click", selectPlace);
+                item.addEventListener("keydown", function (event) {
+                    if (event.key === "Enter" || event.key === " ") {
+                        event.preventDefault();
+                        selectPlace();
+                    }
+                });
+
+                resultList.appendChild(item);
+            });
+        }
+
+        // 병원·약국 마커를 클릭하면 정보창을 엽니다.
+        function showMedicalInfo(place, marker) {
+            const content = document.createElement("div");
+            content.style.cssText = "padding:10px;width:220px;font-size:13px;line-height:1.6;overflow-wrap:anywhere;";
+
+            const title = document.createElement("strong");
+            title.textContent = place.place_name + " (" + place.medicalType + ")";
+            content.appendChild(title);
+
+            const address = document.createElement("div");
+            address.textContent = place.road_address_name || place.address_name || "주소 정보 없음";
+            content.appendChild(address);
+
+            const openTime = document.createElement("div");
+            openTime.textContent = "오픈 시간: 상세 정보에서 확인";
+            content.appendChild(openTime);
+
+            const closeTime = document.createElement("div");
+            closeTime.textContent = "클로즈 시간: 상세 정보에서 확인";
+            content.appendChild(closeTime);
+
+            if (place.phone) {
+                const phone = document.createElement("div");
+                phone.textContent = "전화: " + place.phone;
+                content.appendChild(phone);
+            }
+
+            if (place.place_url) {
+                const link = document.createElement("a");
+                link.href = place.place_url;
+                link.target = "_blank";
+                link.rel = "noopener noreferrer";
+                link.textContent = "카카오맵에서 영업시간 확인";
+                link.style.cssText = "display:inline-block;margin-top:6px;color:#2469d8;";
+                content.appendChild(link);
+            }
+
+            infoWindow.setContent(content);
+            infoWindow.open(map, marker);
+        }
+
+        // 학교 마커를 클릭하면 학교 이름을 표시합니다.
+        function showInfo(name, description, marker) {
+            const content = document.createElement("div");
+            content.style.cssText = "padding:10px;font-size:13px;line-height:1.5;";
+            const title = document.createElement("strong");
+            title.textContent = name;
+            const detail = document.createElement("div");
+            detail.textContent = description;
+            content.append(title, detail);
+            infoWindow.setContent(content);
+            infoWindow.open(map, marker);
+        }
+
+        // SDK 스크립트가 먼저 실행된 뒤 지도를 초기화합니다.
+        window.addEventListener("load", initializeMap);
+    </script>
+</body>
+</html>
